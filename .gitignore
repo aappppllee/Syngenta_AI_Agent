@@ -1,0 +1,17 @@
+# Ignore environment variables
+.env
+
+# Ignore Python virtual environment
+venv/
+env/
+
+# Ignore Python cache and build files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+
+# Ignore logs
+logs/

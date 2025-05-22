@@ -14,8 +14,9 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 # OAuth2PasswordBearer scheme. 
-# tokenUrl should point to your login endpoint (relative to API root).
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login") # Corrected: relative to /api/v1 prefix in main.py
+# tokenUrl should point to your login endpoint.
+# Changed to be an absolute path from the API root.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login") 
 
 async def get_current_user_from_token(
     token: str = Depends(oauth2_scheme), 
@@ -37,7 +38,6 @@ async def get_current_user_from_token(
         logger.warning("Token decoding failed or token expired.")
         raise credentials_exception
     
-    # 'sub' (subject) typically holds username or unique ID. We store user_id for direct lookup.
     user_id_from_token: Optional[int] = payload.get("user_id")
     username_from_token: Optional[str] = payload.get("sub") # Subject, often username
 
@@ -45,23 +45,18 @@ async def get_current_user_from_token(
         logger.warning("Token payload missing 'user_id' and 'sub' (username).")
         raise credentials_exception
     
-    # Validate payload structure with Pydantic if desired, e.g. TokenData(**payload)
-    # For now, direct access.
-    
     user: Optional[SystemUser] = None
     if user_id_from_token is not None:
         logger.debug(f"Attempting to fetch user by ID: {user_id_from_token} from token.")
-        user = await user_crud.get_user(db, user_id=user_id_from_token) # get_user eager loads role & perms
-    elif username_from_token is not None: # Fallback if user_id not in token, but username (sub) is
+        user = await user_crud.get_user(db, user_id=user_id_from_token) 
+    elif username_from_token is not None: 
         logger.debug(f"Attempting to fetch user by username: {username_from_token} from token 'sub'.")
-        user = await user_crud.get_user_by_username(db, username=username_from_token) # Also eager loads
+        user = await user_crud.get_user_by_username(db, username=username_from_token) 
         
     if user is None:
         logger.warning(f"User not found in DB for token payload (user_id: {user_id_from_token}, username: {username_from_token}).")
         raise credentials_exception
     
-    # User's role and its permissions should be loaded due to eager loading in user_crud functions.
-    # For debugging:
     if settings.DEBUG_MODE:
         if user.role:
             logger.debug(f"User {user.username} has role: {user.role.role_name} with {len(user.role.permissions)} permissions.")
@@ -98,3 +93,4 @@ async def get_current_admin_user(
         )
     logger.debug(f"Admin access GRANTED for user: {current_user.username}")
     return current_user
+

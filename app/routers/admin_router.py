@@ -1,17 +1,19 @@
 import logging
 import os
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Request # Added Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List as PyList, Optional
+from sqlalchemy.future import select # Added for checking users with role
+from typing import List as PyList, Optional, Dict # Added Dict
 
+# from agent.core import agent_core_instance # REMOVE THIS LINE
 from app.db.database import get_db_session, AsyncSessionLocal
 from app.dependencies import get_current_admin_user 
 from app.models.db_models import SystemUser, Role as DBRole, PolicyDocument as DBPolicyDocument, ActionTypeEnum, SCMPermission as DBPermission, SCMChatMessage
 from app.schemas import user_schemas, role_schemas, policy_document_schemas, audit_log_schemas, permission_schemas, chat_message_schemas
 from app.db.crud import user_crud, role_crud, policy_document_crud, permission_crud, audit_log_crud as crud_audit_log, chat_message_crud
-from app.data_loading.load_dataco_csv import load_data_from_csv
+# from app.data_loading.load_dataco_csv import load_data_from_csv # This is handled in main.py now
 from app.config import settings
-from agent.core import agent_core_instance # Import the global agent_core_instance for indexing & memory clear
+from agent.core import AgentCore # Import the class for type hinting if needed
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,17 @@ router = APIRouter(
     tags=["Admin Management"],
     dependencies=[Depends(get_current_admin_user)] 
 )
+
+# Helper function to get agent_core_instance from request
+def get_agent_core(request: Request) -> AgentCore:
+    agent_core = getattr(request.app.state, 'agent_core', None)
+    if not agent_core:
+        logger.critical("AgentCore instance not found on app.state. This indicates a setup error in main.py.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Agent core service is not configured or available. Please contact support."
+        )
+    return agent_core
 
 # --- User Management Endpoints (Admin) ---
 @router.get("/users", response_model=PyList[user_schemas.UserSchema], summary="List All Users (Admin)")
@@ -70,7 +83,7 @@ async def admin_update_user(
     except Exception as e_log:
         logger.error(f"Failed to create audit log for user update: {e_log}", exc_info=settings.DEBUG_MODE)
 
-    user_for_response = await user_crud.get_user(db, user_id=updated_user_orm.user_id) # Re-fetch for eager loaded role
+    user_for_response = await user_crud.get_user(db, user_id=updated_user_orm.user_id) 
     return user_schemas.UserSchema.model_validate(user_for_response)
 
 
@@ -101,7 +114,7 @@ async def admin_create_role(
 @router.get("/roles", response_model=PyList[permission_schemas.RoleWithPermissionsSchema], summary="List All Roles with Permissions (Admin)")
 async def admin_read_roles_with_permissions(skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_db_session)):
     logger.info(f"Admin: Fetching roles with permissions (skip={skip}, limit={limit}).")
-    roles = await role_crud.get_roles(db, skip=skip, limit=limit) # get_roles eager loads permissions
+    roles = await role_crud.get_roles(db, skip=skip, limit=limit) 
     return [permission_schemas.RoleWithPermissionsSchema.model_validate(role) for role in roles]
 
 
@@ -123,7 +136,7 @@ async def admin_update_role(
     admin_user: SystemUser = Depends(get_current_admin_user)
 ):
     logger.info(f"Admin '{admin_user.username}': Attempting to update role ID {role_id}")
-    updated_role = await role_crud.update_role(db, role_id=role_id, role_update_data=role_in) # Changed id to role_id and data to role_update_data
+    updated_role = await role_crud.update_role(db, role_id=role_id, role_update_data=role_in) 
     if updated_role is None:
         logger.warning(f"Admin: Update role failed. Role ID {role_id} not found.")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
@@ -146,12 +159,14 @@ async def admin_delete_role(
     admin_user: SystemUser = Depends(get_current_admin_user)
 ):
     logger.info(f"Admin '{admin_user.username}': Attempting to delete role ID {role_id}")
-    users_with_role_result = await db.execute(select(SystemUser).filter(SystemUser.role_id == role_id).limit(1)) # Corrected select
+    # Check if any user is assigned this role
+    from sqlalchemy import select # Local import for this specific query
+    users_with_role_result = await db.execute(select(SystemUser).filter(SystemUser.role_id == role_id).limit(1)) 
     if users_with_role_result.scalars().first():
         logger.warning(f"Admin: Delete role failed. Role ID {role_id} is currently assigned to users.")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Role cannot be deleted, it is currently assigned to users.")
 
-    deleted_role = await role_crud.delete_role(db, role_id=role_id) # Changed id to role_id
+    deleted_role = await role_crud.delete_role(db, role_id=role_id) 
     if deleted_role is None:
         logger.warning(f"Admin: Delete role failed. Role ID {role_id} not found.")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
@@ -168,8 +183,6 @@ async def admin_delete_role(
 
 
 # --- Policy Document Management Endpoints (Admin) ---
-# Assuming PolicyDocumentService is not used here for directness, calling CRUDs.
-# If PolicyDocumentService was to be used, it would be injected via Depends.
 @router.post("/documents", response_model=policy_document_schemas.PolicyDocumentSchema, status_code=status.HTTP_201_CREATED, summary="Create Policy Document Metadata (Admin)")
 async def admin_create_policy_document(
     doc_in: policy_document_schemas.PolicyDocumentCreate,
@@ -256,32 +269,26 @@ async def admin_get_permissions_for_role(role_id: int, db: AsyncSession = Depend
     return role.permissions
 
 
-# --- Endpoint for SCM Data Loading (moved to main.py to use app.add_task for BackgroundTasks) ---
-# This endpoint is now defined in main.py because BackgroundTasks is typically tied to the FastAPI app instance.
-
 # --- Endpoint for Document Indexing ---
 @router.post("/index-documents", status_code=status.HTTP_202_ACCEPTED, summary="Trigger Document Indexing (Admin)")
-async def trigger_document_indexing_admin_endpoint( # Renamed to avoid conflict with main.py one if both exist
-    background_tasks: BackgroundTasks, # Inject BackgroundTasks
+async def trigger_document_indexing_admin_endpoint( 
+    request: Request, # Added request to access app.state
+    background_tasks: BackgroundTasks, 
     admin_user: SystemUser = Depends(get_current_admin_user),
-    db: AsyncSession = Depends(get_db_session) # For audit logging the trigger action
+    db: AsyncSession = Depends(get_db_session) 
 ):
+    agent_core = get_agent_core(request) # Get agent_core from app.state
     logger.info(f"Admin user {admin_user.username} triggered document indexing via admin router.")
     
     async def background_index_task():
-        # Create a new session for the background task
         task_db_session = AsyncSessionLocal()
         try:
             logger.info("Background task: Starting document indexing...")
-            # agent_core_instance needs to be accessible here.
-            # If admin_router is in a separate file, agent_core_instance (from main.py)
-            # needs to be passed or made available (e.g., via app state or dependency).
-            # For now, assuming it's imported or available.
-            if agent_core_instance and hasattr(agent_core_instance, 'document_retriever'):
-                 await agent_core_instance.document_retriever.index_documents_from_db() # This itself uses AsyncSessionLocal
+            if agent_core and hasattr(agent_core, 'document_retriever'):
+                 await agent_core.document_retriever.index_documents_from_db() 
                  logger.info("Background task: Document indexing completed by retriever.")
                  await crud_audit_log.create_audit_log(task_db_session, audit_log_schemas.AuditLogCreate(
-                    user_id=admin_user.user_id, action_type=ActionTypeEnum.ADMIN_ACTION,
+                    user_id=admin_user.user_id, action_type=ActionTypeEnum.DOC_INDEXED, # Changed to DOC_INDEXED
                     details=f"Background document indexing triggered by admin '{admin_user.username}' completed.",
                     accessed_resource="all_documents_for_indexing"
                  ))
@@ -290,34 +297,37 @@ async def trigger_document_indexing_admin_endpoint( # Renamed to avoid conflict 
                 logger.error("Background task: agent_core_instance or document_retriever not available for indexing.")
         except Exception as e_index:
             logger.error(f"Background task: Error during document indexing: {e_index}", exc_info=settings.DEBUG_MODE)
-            await task_db_session.rollback() # Rollback audit log if indexing failed
+            await task_db_session.rollback() 
         finally:
             await task_db_session.close()
 
     background_tasks.add_task(background_index_task)
     
-    # Log the trigger action immediately
     await crud_audit_log.create_audit_log(db, audit_log_schemas.AuditLogCreate(
         user_id=admin_user.user_id, action_type=ActionTypeEnum.ADMIN_ACTION,
         details=f"Admin '{admin_user.username}' initiated document indexing process.",
         accessed_resource="document_indexing_trigger"
     ))
+    await db.commit() # Commit the audit log for triggering
     return {"message": "Document indexing process initiated in the background. Check server logs."}
 
 # --- Endpoint for clearing chat session memory (Admin) ---
 @router.delete("/sessions/{session_id}/clear-memory", status_code=status.HTTP_200_OK, summary="Clear Chat Session Memory (Admin)")
 async def admin_clear_chat_session_memory(
     session_id: str,
+    request: Request, # Added request to access app.state
     admin_user: SystemUser = Depends(get_current_admin_user),
-    db: AsyncSession = Depends(get_db_session) # For audit logging
+    db: AsyncSession = Depends(get_db_session) 
 ):
+    agent_core = get_agent_core(request) # Get agent_core from app.state
     logger.info(f"Admin '{admin_user.username}' attempting to clear memory for session ID: {session_id}")
-    if not agent_core_instance or not hasattr(agent_core_instance, 'memory_manager'):
+    
+    if not agent_core or not hasattr(agent_core, 'memory_manager'): # Check the retrieved agent_core
         logger.error("Admin clear memory: Agent core or memory manager not available.")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Memory service not configured.")
 
     try:
-        agent_core_instance.memory_manager.clear_session_memory(session_id) # This method should handle DB clearing
+        agent_core.memory_manager.clear_session_memory(session_id) 
         logger.info(f"Memory cleared for session ID: {session_id} by admin '{admin_user.username}'.")
         
         await crud_audit_log.create_audit_log(db, audit_log_schemas.AuditLogCreate(
@@ -325,8 +335,10 @@ async def admin_clear_chat_session_memory(
             details=f"Admin '{admin_user.username}' cleared memory for session ID: {session_id}",
             accessed_resource=f"session_memory:{session_id}"
         ))
+        await db.commit() # Commit the audit log
         return {"message": f"Memory for session ID '{session_id}' cleared successfully."}
     except Exception as e:
         logger.error(f"Error clearing memory for session ID '{session_id}': {e}", exc_info=settings.DEBUG_MODE)
+        await db.rollback() # Rollback audit log if clearing failed
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to clear memory: {str(e)}")
 

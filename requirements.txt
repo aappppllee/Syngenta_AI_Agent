@@ -1,8 +1,23 @@
 fastapi
-uvicorn
+uvicorn[standard] # Includes standard server dependencies like websockets
 sqlalchemy
+asyncpg # For PostgreSQL async
+psycopg2-binary # For PostgreSQL sync (Langchain SQL tools, pgvector)
 pydantic
+pydantic[email]
+pydantic-settings # For BaseSettings
 python-dotenv
-databases
-passlib
-python-jose
+passlib[bcrypt]
+python-jose[cryptography]
+langchain
+langchain-openai
+langchain-anthropic # If using Anthropic
+langchain-community # For PGVector, SQLDatabase, etc.
+langchain-experimental # For SQLDatabaseChain
+tiktoken # For token counting with OpenAI
+pgvector # Python client for pgvector
+pandas # For data loading
+# Add any other specific libraries your custom Bedrock wrappers might need
+# For example, if you use boto3 for Bedrock:
+boto3
+python-multipart
